@@ -103,18 +103,24 @@ class AwsSso:
     def list_users(self):
         return self._req('GET', 'Users')['Resources']
 
-    def create_user(self, ext_id, email, given_name, family_name):
-        emails = [dict(value=email, type='work', primary=True)]
+    def create_user(self, ext_id, username, given_name, family_name):
+        emails = [dict(value=username, type='work', primary=True)]
         name = dict(familyName=family_name, givenName=given_name)
         user = dict(
             externalId=ext_id,
-            userName=email,
+            userName=username,
             displayName=f'{given_name} {family_name}',
             name=name,
             emails=emails,
             active=True,
         )
         return self._req('POST', 'Users', json=user)
+
+    def update_user(self, user_id, user_obj):
+        return self._req('PUT', f'Users/{user_id}', json=user_obj)
+
+    def delete_user(self, user_id):
+        return self._req('DELETE', f'Users/{user_id}')
 
     def get_group(self, name):
         resp = self._req('GET', 'Groups', params={'filter': f'displayName eq "{name}"'})
@@ -150,19 +156,51 @@ if __name__ == '__main__':
     ap.add_argument('group', nargs='+', help='Groups to synchronise')
     args = ap.parse_args()
 
-    # map users based on their email in GSuite which is their username in AWS
+    # map users based on their id in GSuite which is their externalId in AWS
     print('Fetching users from GSuite ... ', end='')
     gsuite = GSuite(args.admin_email)
     g_users = gsuite.users()
-    g_map = {u['primaryEmail']:u for u in g_users}
+    g_map = {u['id']:u for u in g_users}
+    g_email_map = {u['primaryEmail']:u for u in g_users}
     print(f'done ({len(g_users)} users)')
 
     print('Fetching users from AWS SSO ... ', end='')
     aws = AwsSso()
     a_users = aws.list_users()
-    a_map = {u['userName']:u for u in a_users}
-    a_groups = {}
     print(f'done ({len(a_users)} users)')
+
+    # map AWS SSO users based on externalId
+    a_map = {}
+    a_prune = []
+    for u in a_users:
+        new_u = u
+
+        if 'externalId' not in u:
+            uid = u['id']
+            username = u['userName']
+            print(f'{username} missing externalId, trying to update ... ', end='')
+            if username in g_email_map:
+                g_user = g_email_map[username]
+                u['externalId'] = g_user['id']
+                new_u = aws.update_user(uid, u)
+                print('done')
+            else:
+                print('not in gsuite')
+                a_prune.append(u['id'])
+                continue
+
+        a_map[new_u['externalId']] = new_u
+
+    # prune users no longer in gsuite
+    print('Removing users no longer present in GSuite')
+    for a_extid, a_user in a_map.items():
+        if a_extid not in g_map:
+            username = a_user['userName']
+            print(f'- removing {username}')
+            a_prune.append(a_user['id'])
+
+    for uid in a_prune:
+        aws.delete_user(uid)
 
     # create specified groups
     for group in args.group:
@@ -185,20 +223,22 @@ if __name__ == '__main__':
 
 
         for g_member in g_members:
-            email = g_member['email']
-            g_user = g_map[email]
+            g_id = g_member['id']
+            g_user = g_map[g_id]
 
             # fetch or create corresponding AWS SSO user
-            if email in a_map:
-                a_user = a_map[email]
-                print(f'Found AWS SSO user: {email}')
+            if g_id in a_map:
+                a_user = a_map[g_id]
+                username = a_user['userName']
+                print(f'Found AWS SSO user: {username}')
             else:
                 given_name = g_user['name']['givenName']
                 family_name = g_user['name']['familyName']
                 external_id = g_user['id']
-                a_user = aws.create_user(external_id, email, given_name, family_name)
-                a_map[email] = a_user
-                print(f'Created AWS SSO user: {email}')
+                username = g_user['primaryEmail']
+                a_user = aws.create_user(external_id, username, given_name, family_name)
+                a_map[external_id] = a_user
+                print(f'Created AWS SSO user: {username}')
 
             a_members.append(a_user['id'])
 
