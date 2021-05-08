@@ -225,17 +225,24 @@ if __name__ == '__main__':
         for g_member in g_members:
             g_id = g_member['id']
             g_user = g_map[g_id]
+            g_email = g_user['primaryEmail']
 
             # fetch or create corresponding AWS SSO user
             if g_id in a_map:
                 a_user = a_map[g_id]
                 username = a_user['userName']
                 print(f'Found AWS SSO user: {username}')
+                # check if username (primary email) has changed in GSuite
+                if username != g_email:
+                    print(f'- user has new primary email in google: {g_email}')
+                    a_id = a_user['id']
+                    a_user['userName'] = g_email
+                    aws.update_user(a_id, a_user)
             else:
                 given_name = g_user['name']['givenName']
                 family_name = g_user['name']['familyName']
                 external_id = g_user['id']
-                username = g_user['primaryEmail']
+                username = g_email
                 a_user = aws.create_user(external_id, username, given_name, family_name)
                 a_map[external_id] = a_user
                 print(f'Created AWS SSO user: {username}')
